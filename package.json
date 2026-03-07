@@ -1,0 +1,13 @@
+{
+  "name": "ai-pet-backend",
+  "version": "1.0.0",
+  "description": "Vercel serverless function for AI Pet Generator",
+  "scripts": {
+    "start": "node"
+  },
+  "dependencies": {
+    "cloudinary": "^2.0.1",
+    "cors": "^2.8.5",
+    "replicate": "^0.25.1"
+  }
+}
