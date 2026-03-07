@@ -40,7 +40,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { imageBase64, promptExtra } = req.body;
+    const { imageBase64, productTitle, promptExtra } = req.body;
 
     if (!imageBase64) {
       return res.status(400).json({ error: 'Nenhuma foto do pet foi enviada.' });
@@ -54,23 +54,23 @@ export default async function handler(req, res) {
     const originalImageUrl = uploadResult.secure_url;
 
     console.log("2. Enviando para o Replicate (O Chef de Cozinha)...");
-    
-    // Montamos o pedido para a IA. 
-    // O 'promptExtra' é o que o cliente escolheu (ex: 'usando uma coleira de couro premium')
-    const finalPrompt = `Professional studio photography of a cute pet ${promptExtra}, highly detailed, 4k, soft lighting, premium e-commerce photography`;
+
+    // Montamos um prompt premium focado na marca Margot e Margaridas
+    const finalPrompt = `Professional studio photography of a cute pet wearing ${productTitle}, ${promptExtra}, luxury e-commerce product shot, highly detailed, soft studio lighting, 8k resolution, photorealistic, cinematic, sharp focus`;
+    const negativePrompt = "ugly, blurry, deformed, poorly drawn, bad anatomy, human hands, text, watermark, cartoon, animated, low res, oversaturated, unnatural lighting";
 
     // Chamamos o modelo SDXL Image-to-Image (Stable Diffusion)
     const output = await replicate.run(
-      "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b", 
+      "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
       {
         input: {
           prompt: finalPrompt,
-          negative_prompt: "ugly, blurry, deformed, poorly drawn, bad anatomy, human hands, text, watermark, cartoon, animated",
+          negative_prompt: negativePrompt,
           image: originalImageUrl,
-          prompt_strength: 0.65, // 0.65 mantém a estrutura do cachorro, mas altera o estilo para adicionar o produto
+          prompt_strength: 0.72, // Ideal para forçar as roupas/coleiras sem destruir a face do animal
           num_outputs: 1,
           scheduler: "K_EULER",
-          num_inference_steps: 30
+          num_inference_steps: 40 // Aumentado para gerar mais detalhes e texturas de tecido/couro
         }
       }
     );
@@ -83,8 +83,8 @@ export default async function handler(req, res) {
     });
 
     // Devolve para a Shopify!
-    return res.status(200).json({ 
-      success: true, 
+    return res.status(200).json({
+      success: true,
       generatedImage: finalResult.secure_url,
       originalImage: originalImageUrl
     });
