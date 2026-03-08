@@ -80,21 +80,24 @@ export default async function handler(req, res) {
     const finalPrompt = `${basePrompt} ${placementPrompt}, the accessory is ${promptExtra}, exact material and pattern as the reference, luxury e-commerce product shot, soft studio lighting, 8k resolution, photorealistic, cinematic, sharp focus`;
     const negativePrompt = "ugly, blurry, deformed face, bad anatomy, human hands, text, watermark, cartoon, animated, low res, oversaturated, messy fur, floating accessories";
 
-    console.log("3. Chamando Motor Estável (SDXL Image-to-Image c/ Smart Prompt)...");
+    console.log("3. Chamando Motor de Edição (InstructPix2Pix c/ Smart Prompt)...");
 
-    // Devido à instabilidade recente dos modelos IP-Adapter públicos no Replicate (Erro 422),
-    // voltamos para a âncora principal (SDXL) usando a foto base + injeção pesada do Dicionário
+    // Construção de Prompt de Instrução Direta (Como o ChatGPT faz)
+    // O InstructPix2Pix não descreve a foto final, ele fala O QUE ALTERAR na foto original.
+    const instructPrompt = `Add a ${productTitle} ${placementPrompt}. Make it ${promptExtra}. Do not change the dog's body, face, or background.`;
+
+    // Pivotando de SDXL (que derretia o cachorro) para o InstructPix2Pix (Edição Inteligente)
     const output = await replicate.run(
-      "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
+      "timbrooks/instruct-pix2pix:30c1d0b916a6f8efce20492f5d61ee27491ab2a60437c13c588468b9810ec23f",
       {
         input: {
-          prompt: finalPrompt,
-          negative_prompt: negativePrompt,
           image: originalPetUrl,
-          prompt_strength: 0.72, // 72% de liberdade para a IA modelar o acessório
+          prompt: instructPrompt,
+          negative_prompt: "deformed face, changed background, altered dog breed, bad anatomy, ugly, artifacts",
           num_outputs: 1,
-          scheduler: "K_EULER",
-          num_inference_steps: 40
+          image_guidance_scale: 1.5, // 1.5 é o padrão perfeito para manter o cachorro intacto
+          guidance_scale: 7.5,       // Força da instrução de adicionar o produto
+          num_inference_steps: 50    // Máximo de cuidado nos detalhes
         }
       }
     );
