@@ -76,6 +76,41 @@ export default async function handler(req, res) {
       placementPrompt = "wearing the accessory beautifully";
     }
 
+    // Helper para rodar Replicate via FETCH nativo (bypass no SDK antigo da Vercel)
+    async function runReplicate(version, input) {
+      const response = await fetch("https://api.replicate.com/v1/predictions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Token ${process.env.REPLICATE_API_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ version, input }),
+      });
+
+      if (!response.ok) {
+        const errDesc = await response.text();
+        throw new Error(`API Error ${response.status}: ${errDesc}`);
+      }
+
+      let prediction = await response.json();
+      const predictionId = prediction.id;
+
+      // Polling loop
+      while (prediction.status !== "succeeded" && prediction.status !== "failed") {
+        await new Promise(r => setTimeout(r, 1000));
+        const pollResponse = await fetch(`https://api.replicate.com/v1/predictions/${predictionId}`, {
+          headers: { "Authorization": `Token ${process.env.REPLICATE_API_TOKEN}` }
+        });
+        prediction = await pollResponse.json();
+      }
+
+      if (prediction.status === "failed") {
+        throw new Error("Geração falhou: " + prediction.error);
+      }
+
+      return prediction.output;
+    }
+
     // Unindo toda a lógica textual
     const finalPrompt = `${basePrompt} ${placementPrompt}, the accessory is ${promptExtra}, exact material and pattern as the reference, luxury e-commerce product shot, soft studio lighting, 8k resolution, photorealistic, cinematic, sharp focus`;
     const negativePrompt = "ugly, blurry, deformed face, bad anatomy, human hands, text, watermark, cartoon, animated, low res, oversaturated, messy fur, floating accessories";
@@ -83,14 +118,12 @@ export default async function handler(req, res) {
     console.log("3. Analisando a foto do Cachorro com Visão LLaVA (Para recriar)...");
 
     // Passo A: A IA Analisa o cachorro real e escreve uma descrição detalhada dele
-    const visionOutput = await replicate.run(
-      "yorickvp/llava-13b", // Remoção da string de versão manual (estava expirada)
+    const visionOutput = await runReplicate(
+      "x5pthttb2mghadkxlvymeprkce", // LLaVA 13b Version Hash Seguro
       {
-        input: {
-          image: originalPetUrl,
-          prompt: "Describe this dog in extreme detail: breed, fur color, expression, pose, and the exact background environment. Be concise and descriptive.",
-          max_tokens: 150
-        }
+        image: originalPetUrl,
+        prompt: "Describe this dog in extreme detail: breed, fur color, expression, pose, and the exact background environment. Be concise and descriptive.",
+        max_tokens: 150
       }
     );
 
@@ -104,14 +137,12 @@ export default async function handler(req, res) {
     const seedreamPrompt = `A stunning, hyper-realistic tracking shot of ${dogDescription}. The dog is ${placementPrompt} a ${productTitle}. The accessory details: ${promptExtra}. Matches the exact material and pattern of a high-end fashion piece. 8k resolution, photorealistic masterpiece, natural lighting.`;
 
     // O modelo aprovado pelo cliente: Bytedance Seedream 4 (Altíssima qualidade de síntese)
-    const output = await replicate.run(
-      "bytedance/seedream-4", // Auto-fetch da versão funcional mais recente
+    const output = await runReplicate(
+      "cf7d431991436f19d1c8dad83fe463c729c816d7a21056c5105e75c84a0aa7e9", // Seedream 4 Version Hash Oficial
       {
-        input: {
-          prompt: seedreamPrompt,
-          size: "2K", // Seedream aceita apenas string de 1K, 2K ou 4K (NÃO aceita 1024x1024)
-          max_images: 1
-        }
+        prompt: seedreamPrompt,
+        size: "2K",
+        max_images: 1
       }
     );
 
@@ -131,6 +162,7 @@ export default async function handler(req, res) {
 
   } catch (error) {
     console.error("Erro Crítico no Pipeline de IA:", error);
-    return res.status(500).json({ error: 'Erro ao gerar a fusão na Vercel.', details: error.message });
+    // VAZANDO O ERRO EXATO PARA A SHOPIFY PARA DEBUGGING IMEDIATO
+    return res.status(500).json({ error: `Vercel Pipeline Error: ${error.message}` });
   }
 }
