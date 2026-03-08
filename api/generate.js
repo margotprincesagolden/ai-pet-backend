@@ -80,24 +80,24 @@ export default async function handler(req, res) {
     const finalPrompt = `${basePrompt} ${placementPrompt}, the accessory is ${promptExtra}, exact material and pattern as the reference, luxury e-commerce product shot, soft studio lighting, 8k resolution, photorealistic, cinematic, sharp focus`;
     const negativePrompt = "ugly, blurry, deformed face, bad anatomy, human hands, text, watermark, cartoon, animated, low res, oversaturated, messy fur, floating accessories";
 
-    console.log("3. Chamando Motor de Edição (InstructPix2Pix c/ Smart Prompt)...");
+    console.log("3. Chamando Motor Inteligente (FLUX Inpainting / Instruct c/ Smart Prompt)...");
 
-    // Construção de Prompt de Instrução Direta (Como o ChatGPT faz)
-    // O InstructPix2Pix não descreve a foto final, ele fala O QUE ALTERAR na foto original.
-    const instructPrompt = `Add a ${productTitle} ${placementPrompt}. Make it ${promptExtra}. Do not change the dog's body, face, or background.`;
+    // O ChatGPT usa um modelo de ponta (DALL-E) que funciona por Inpainting textual. 
+    // Como conversamos, a IA vai gerar uma representação fotorealista do acessório 
+    // para preservar o cachorro intacto. Nós usamos o FLUX que é o estado da arte.
 
-    // Pivotando de SDXL (que derretia o cachorro) para o InstructPix2Pix (Edição Inteligente)
+    // A descrição do produto precisa ser super rica porque a IA vai recriá-la
+    const instructPrompt = `Add a beautiful ${productTitle} ${placementPrompt}. The accessory details: ${promptExtra}. The dog's face, fur, background, and body shape must remain absolutely identical to the original image.`;
+
     const output = await replicate.run(
-      "timbrooks/instruct-pix2pix:30c1d0b916a6f8efce20492f5d61ee27491ab2a60437c13c588468b9810ec23f",
+      "black-forest-labs/flux-fill-dev", // Modelo super atual de "Fill/Inpaint" guiado
       {
         input: {
           image: originalPetUrl,
           prompt: instructPrompt,
-          negative_prompt: "deformed face, changed background, altered dog breed, bad anatomy, ugly, artifacts",
-          num_outputs: 1,
-          image_guidance_scale: 1.5, // 1.5 é o padrão perfeito para manter o cachorro intacto
-          guidance_scale: 7.5,       // Força da instrução de adicionar o produto
-          num_inference_steps: 50    // Máximo de cuidado nos detalhes
+          guidance: 30,         // Muito alto para obedecer cegamente o prompt do acessório
+          steps: 40,            // Mais passos = acessório mais realista
+          output_format: "jpg"
         }
       }
     );
