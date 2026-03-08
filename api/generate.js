@@ -80,24 +80,24 @@ export default async function handler(req, res) {
     const finalPrompt = `${basePrompt} ${placementPrompt}, the accessory is ${promptExtra}, exact material and pattern as the reference, luxury e-commerce product shot, soft studio lighting, 8k resolution, photorealistic, cinematic, sharp focus`;
     const negativePrompt = "ugly, blurry, deformed face, bad anatomy, human hands, text, watermark, cartoon, animated, low res, oversaturated, messy fur, floating accessories";
 
-    console.log("3. Chamando Motor Inteligente (FLUX Inpainting / Instruct c/ Smart Prompt)...");
+    console.log("3. Chamando Motor de Alta Fidelidade (SDXL Preservacionista)...");
 
-    // O ChatGPT usa um modelo de ponta (DALL-E) que funciona por Inpainting textual. 
-    // Como conversamos, a IA vai gerar uma representação fotorealista do acessório 
-    // para preservar o cachorro intacto. Nós usamos o FLUX que é o estado da arte.
-
-    // A descrição do produto precisa ser super rica porque a IA vai recriá-la
-    const instructPrompt = `Add a beautiful ${productTitle} ${placementPrompt}. The accessory details: ${promptExtra}. The dog's face, fur, background, and body shape must remain absolutely identical to the original image.`;
+    // Para atingir o efeito do ChatGPT sem necessitar de uma máscara de recorte manual (Mask),
+    // reduzimos a força do Prompt (prompt_strength). Assim, o robô é forçado a manter 
+    // a base fotográfica (o corpo e rosto do cachorro) totalmente inalterada, focando 
+    // apenas em renderizar o pequeno detalhe (Laço/Bandana).
 
     const output = await replicate.run(
-      "black-forest-labs/flux-fill-dev", // Modelo super atual de "Fill/Inpaint" guiado
+      "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
       {
         input: {
+          prompt: `${basePrompt} ${placementPrompt}, highly detailed accessory: ${promptExtra}, 8k resolution, photorealistic`,
+          negative_prompt: "deformed face, deformed body, changed breed, floating accessory, bad anatomy, ugly",
           image: originalPetUrl,
-          prompt: instructPrompt,
-          guidance: 30,         // Muito alto para obedecer cegamente o prompt do acessório
-          steps: 40,            // Mais passos = acessório mais realista
-          output_format: "jpg"
+          prompt_strength: 0.35, // CHAVE DE OURO: 35% de força de IA = 65% de preservação absoluta do cão
+          num_outputs: 1,
+          scheduler: "K_EULER",
+          num_inference_steps: 50 // Mais passos para refinar o desenho no nível ChatGPT
         }
       }
     );
