@@ -80,31 +80,44 @@ export default async function handler(req, res) {
     const finalPrompt = `${basePrompt} ${placementPrompt}, the accessory is ${promptExtra}, exact material and pattern as the reference, luxury e-commerce product shot, soft studio lighting, 8k resolution, photorealistic, cinematic, sharp focus`;
     const negativePrompt = "ugly, blurry, deformed face, bad anatomy, human hands, text, watermark, cartoon, animated, low res, oversaturated, messy fur, floating accessories";
 
-    console.log("3. Chamando Motor de Alta Fidelidade (SDXL Preservacionista)...");
+    console.log("3. Analisando a foto do Cachorro com Visão LLaVA (Para recriar)...");
 
-    // Para atingir o efeito do ChatGPT sem necessitar de uma máscara de recorte manual (Mask),
-    // reduzimos a força do Prompt (prompt_strength). Assim, o robô é forçado a manter 
-    // a base fotográfica (o corpo e rosto do cachorro) totalmente inalterada, focando 
-    // apenas em renderizar o pequeno detalhe (Laço/Bandana).
-
-    const output = await replicate.run(
-      "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
+    // Passo A: A IA Analisa o cachorro real e escreve uma descrição detalhada dele
+    const visionOutput = await replicate.run(
+      "yorickvp/llava-13b:b5f621affc37f12539a441e3c11396a31173bb23f79ef9ae521714fc2ee81a26",
       {
         input: {
-          prompt: `${basePrompt} ${placementPrompt}, highly detailed accessory: ${promptExtra}, 8k resolution, photorealistic`,
-          negative_prompt: "deformed face, deformed body, changed breed, floating accessory, bad anatomy, ugly",
           image: originalPetUrl,
-          prompt_strength: 0.35, // CHAVE DE OURO: 35% de força de IA = 65% de preservação absoluta do cão
-          num_outputs: 1,
-          scheduler: "K_EULER",
-          num_inference_steps: 50 // Mais passos para refinar o desenho no nível ChatGPT
+          prompt: "Describe this dog in extreme detail: breed, fur color, expression, pose, and the exact background environment. Be concise and descriptive.",
+          max_tokens: 150
         }
       }
     );
 
-    const generatedImageUrl = output[0]; // Retorno do Replicate
+    // Junta a resposta do LLaVA (Array de strings -> String única)
+    const dogDescription = Array.isArray(visionOutput) ? visionOutput.join("") : visionOutput;
+    console.log("-> Cão mapeado:", dogDescription);
 
-    console.log("4. Salvando a arte final...");
+    console.log("4. Criando Arte Mágica Final com Seedream-4...");
+
+    // Passo B: Fundimos a descrição real do cão com o detalhamento de luxo do produto
+    const seedreamPrompt = `A stunning, hyper-realistic tracking shot of ${dogDescription}. The dog is ${placementPrompt} a ${productTitle}. The accessory details: ${promptExtra}. Matches the exact material and pattern of a high-end fashion piece. 8k resolution, photorealistic masterpiece, natural lighting.`;
+
+    // O modelo aprovado pelo cliente: Bytedance Seedream 4 (Altíssima qualidade de síntese)
+    const output = await replicate.run(
+      "bytedance/seedream-4:cf7d431991436f19d1c8dad83fe463c729c816d7a21056c5105e75c84a0aa7e9",
+      {
+        input: {
+          prompt: seedreamPrompt,
+          size: "1024x1024", // Formato HQ
+          max_images: 1
+        }
+      }
+    );
+
+    const generatedImageUrl = Array.isArray(output) ? output[0] : output; // Retorno do Seedream
+
+    console.log("5. Salvando a arte final...");
     const finalResult = await cloudinary.uploader.upload(generatedImageUrl, {
       folder: 'ai_pet_generated',
     });
