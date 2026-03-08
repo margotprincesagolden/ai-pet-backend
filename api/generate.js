@@ -2,13 +2,13 @@ import { v2 as cloudinary } from 'cloudinary';
 import Replicate from 'replicate';
 import Cors from 'cors';
 
-// Middleware do CORS para permitir que a Shopify (ou qualquer site) chame essa API
+// Middleware do CORS (Shopify -> Vercel)
 const cors = Cors({
   methods: ['POST', 'GET', 'HEAD', 'OPTIONS'],
-  origin: '*' // Em produção, mude para: 'https://sua-loja.myshopify.com'
+  origin: '*'
 });
 
-// Helper para rodar o middleware
+// Helper de Execução Middleware
 function runMiddleware(req, res, fn) {
   return new Promise((resolve, reject) => {
     fn(req, res, (result) => {
@@ -18,79 +18,104 @@ function runMiddleware(req, res, fn) {
   });
 }
 
-// Configura o Cloudinary com as chaves que você me passou
-// Aqui usamos process.env para que a chave secreta não vaze no código da Shopify!
+// Configura o Cloudinary Seguramente via .env
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
+// Autentica no Replicate
 const replicate = new Replicate({
   auth: process.env.REPLICATE_API_TOKEN,
 });
 
+// O Sistema Principal de Geração (Advanced IP-Adapter & Smart Dictionary)
 export default async function handler(req, res) {
-  // Roda o CORS
   await runMiddleware(req, res, cors);
 
-  // Só aceitamos método POST (envio de dados)
   if (req.method !== 'POST') {
     return res.status(405).json({ message: 'Método não permitido.' });
   }
 
   try {
-    const { imageBase64, productTitle, promptExtra } = req.body;
+    // Agora recebemos a foto do Pet E do Produto vindo da Shopify
+    const { imageBase64, productImageBase64, productTitle, promptExtra } = req.body;
 
-    if (!imageBase64) {
-      return res.status(400).json({ error: 'Nenhuma foto do pet foi enviada.' });
+    if (!imageBase64 || !productImageBase64) {
+      return res.status(400).json({ error: 'Faltam imagens (Pet ou Produto) para a mágica.' });
     }
 
-    console.log("1. Fazendo upload da foto para o Cloudinary...");
-    // Isso cria um link público rápido para a foto do cliente
-    const uploadResult = await cloudinary.uploader.upload(imageBase64, {
-      folder: 'ai_pet_uploads',
-    });
-    const originalImageUrl = uploadResult.secure_url;
+    console.log("1. Fazendo upload de ambas as fotos para o Cloudinary...");
 
-    console.log("2. Enviando para o Replicate (O Chef de Cozinha)...");
+    // Sobe a foto do Cachorro
+    const petUpload = await cloudinary.uploader.upload(imageBase64, { folder: 'ai_pet_uploads' });
+    const originalPetUrl = petUpload.secure_url;
 
-    // Montamos um prompt premium focado na marca Margot e Margaridas
-    const finalPrompt = `Professional studio photography of a cute pet wearing ${productTitle}, ${promptExtra}, luxury e-commerce product shot, highly detailed, soft studio lighting, 8k resolution, photorealistic, cinematic, sharp focus`;
-    const negativePrompt = "ugly, blurry, deformed, poorly drawn, bad anatomy, human hands, text, watermark, cartoon, animated, low res, oversaturated, unnatural lighting";
+    // Sobe a foto do Produto Original (Referência Material/Cor para a IA)
+    const productUpload = await cloudinary.uploader.upload(productImageBase64, { folder: 'ai_product_refs' });
+    const productRefUrl = productUpload.secure_url;
 
-    // Chamamos o modelo SDXL Image-to-Image (Stable Diffusion)
+    console.log("2. Aplicando o SMART PLACEMENT DICTIONARY...");
+    let placementPrompt = "";
+    let basePrompt = "A highly detailed, professional studio photography of a cute pet";
+    const titleLower = productTitle.toLowerCase();
+
+    // Dicionário de Posicionamento Lógico
+    if (titleLower.includes("bandana") || titleLower.includes("coleira") || titleLower.includes("guia")) {
+      placementPrompt = "perfectly wrapped around the pet's neck, neckwear focus";
+    }
+    else if (titleLower.includes("laço") || titleLower.includes("laco") || titleLower.includes("presilha")) {
+      placementPrompt = "placed elegantly on top of the pet's head, between the ears, hair accessory focus";
+    }
+    else if (titleLower.includes("kit")) {
+      placementPrompt = "wearing matching accessories around the neck and on top of the head";
+    }
+    else {
+      // Fallback se não detectar
+      placementPrompt = "wearing the accessory beautifully";
+    }
+
+    // Unindo toda a lógica textual
+    const finalPrompt = `${basePrompt} ${placementPrompt}, the accessory is ${promptExtra}, exact material and pattern as the reference, luxury e-commerce product shot, soft studio lighting, 8k resolution, photorealistic, cinematic, sharp focus`;
+    const negativePrompt = "ugly, blurry, deformed face, bad anatomy, human hands, text, watermark, cartoon, animated, low res, oversaturated, messy fur, floating accessories";
+
+    console.log("3. Chamando Motor Avançado com Fusão de Imagem (IP-Adapter/SDXL)...");
+
+    // Mudamos o modelo do básico (Image2Image normal) para um que aceita IP-Adapter
+    // O hysts/ip-adapter-sdxl injeta a imagem de referência (produto) direto na geração
     const output = await replicate.run(
-      "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
+      "hysts/ip-adapter-sdxl:8e29a8a7061b4db1b369cc24d101d7e283ab2964fe5fac1136b6fba30da57f07",
       {
         input: {
-          prompt: finalPrompt,
+          image: originalPetUrl,                // A foto base (o Cachorro)
+          ip_adapter_image: productRefUrl,      // A foto referência (o Laço/Bandana) para roubar cor/tecido
+          prompt: finalPrompt,                  // Direcionamento lógico de onde a peça vai
           negative_prompt: negativePrompt,
-          image: originalImageUrl,
-          prompt_strength: 0.72, // Ideal para forçar as roupas/coleiras sem destruir a face do animal
+          scale: 0.65,                          // Força da textura do produto
+          control_scale: 0.70,                  // Manter a estrutura do cachorro intacta
           num_outputs: 1,
-          scheduler: "K_EULER",
-          num_inference_steps: 40 // Aumentado para gerar mais detalhes e texturas de tecido/couro
+          num_inference_steps: 40
         }
       }
     );
 
-    const generatedImageUrl = output[0]; // A IA devolve a imagem recém-criada
+    const generatedImageUrl = output[0]; // Retorno do Replicate
 
-    console.log("3. Salvando a arte final para não expirar...");
+    console.log("4. Salvando a arte final...");
     const finalResult = await cloudinary.uploader.upload(generatedImageUrl, {
       folder: 'ai_pet_generated',
     });
 
-    // Devolve para a Shopify!
     return res.status(200).json({
       success: true,
       generatedImage: finalResult.secure_url,
-      originalImage: originalImageUrl
+      originalPet: originalPetUrl,
+      productRef: productRefUrl
     });
 
   } catch (error) {
-    console.error("Erro no processamento da IA:", error);
-    return res.status(500).json({ error: 'Erro ao gerar a mágica. Tente novamente.', details: error.message });
+    console.error("Erro Crítico no Pipeline de IA:", error);
+    return res.status(500).json({ error: 'Erro ao gerar a fusão na Vercel.', details: error.message });
   }
 }
