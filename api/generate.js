@@ -15,72 +15,70 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// ─── ANÁLISE VISUAL DO PET VIA LLaVA ─────────────────────────────────────────
-// Retorna: { isAnimal, breed, size, sizeLabel, furType, pose }
-async function analyzePet(imageUrl) {
-  const response = await fetch(
-    'https://api.replicate.com/v1/models/yorickvp/llava-13b/predictions',
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Token ${process.env.REPLICATE_API_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        version: 'b5f621affc37f12539a441e3c11396a31173bb23f79ef9ae521714fc2ee81a26',
-        input: {
-          image: imageUrl,
-          prompt: `Analyze this image and respond in JSON only, no extra text. Use this exact format:
+// ─── ANÁLISE DO PET VIA CLAUDE (rápido, preciso, não compete com Replicate) ───
+async function analyzePetWithClaude(imageUrl) {
+  // Baixa a imagem e converte para base64 para enviar ao Claude
+  const imgRes = await fetch(imageUrl);
+  const imgBuffer = await imgRes.arrayBuffer();
+  const base64 = Buffer.from(imgBuffer).toString('base64');
+  const mimeType = imgRes.headers.get('content-type') || 'image/jpeg';
+
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001', // Haiku: ultra rápido e barato para visão
+      max_tokens: 300,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: mimeType, data: base64 },
+            },
+            {
+              type: 'text',
+              text: `Analyze this image. Respond ONLY with a JSON object, no extra text:
 {
   "is_pet": true or false,
   "animal_type": "dog" or "cat" or "other" or "none",
-  "breed": "breed name or mixed",
+  "breed": "breed name or mixed breed",
   "size": "tiny" or "small" or "medium" or "large" or "giant",
   "weight_estimate_kg": number,
   "fur_type": "short" or "medium" or "long" or "curly" or "wire",
-  "fur_color": "description",
+  "fur_color": "brief color description",
   "pose": "sitting" or "standing" or "lying" or "running" or "other",
   "neck_visible": true or false,
   "head_top_visible": true or false,
   "face_visible": true or false
 }
 
-Size guide: tiny=under 3kg (Chihuahua), small=3-10kg (Poodle), medium=10-25kg (Beagle), large=25-45kg (Labrador), giant=over 45kg (Great Dane).`,
-          max_tokens: 200,
-          temperature: 0.1,
+Size guide: tiny=under 3kg (Chihuahua), small=3-10kg (Poodle/Shih Tzu), medium=10-25kg (Beagle/Bulldog), large=25-45kg (Labrador/Golden), giant=over 45kg (Great Dane/São Bernardo).`,
+            },
+          ],
         },
-      }),
-    }
-  );
+      ],
+    }),
+  });
 
-  if (!response.ok) throw new Error('LLaVA vision request failed');
-
-  let prediction = await response.json();
-  const predId = prediction.id;
-
-  // Poll até terminar
-  for (let i = 0; i < 30; i++) {
-    await new Promise(r => setTimeout(r, 2000));
-    const poll = await fetch(`https://api.replicate.com/v1/predictions/${predId}`, {
-      headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` },
-    });
-    prediction = await poll.json();
-    if (prediction.status === 'succeeded' || prediction.status === 'failed') break;
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Claude vision error ${response.status}: ${err}`);
   }
 
-  if (prediction.status !== 'succeeded') throw new Error('Vision analysis failed');
-
-  const raw = Array.isArray(prediction.output) ? prediction.output.join('') : prediction.output;
-
-  // Extrai JSON da resposta (LLaVA às vezes adiciona texto antes/depois)
+  const data = await response.json();
+  const raw = data.content?.[0]?.text || '';
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('Could not parse vision output');
-
+  if (!jsonMatch) throw new Error('Claude did not return valid JSON');
   return JSON.parse(jsonMatch[0]);
 }
 
 // ─── DICIONÁRIO DE PEÇAS — INTELIGENTE POR TAMANHO ───────────────────────────
-// Cada peça sabe onde fica, como escala com o tamanho, e o que é crítico mostrar
 function buildAccessoryInstructions(productTitle, promptExtra, petAnalysis) {
   const t = productTitle.toLowerCase();
   const size = petAnalysis?.size || 'medium';
@@ -88,98 +86,82 @@ function buildAccessoryInstructions(productTitle, promptExtra, petAnalysis) {
   const neckVisible = petAnalysis?.neck_visible !== false;
   const headVisible = petAnalysis?.head_top_visible !== false;
 
-  // Mapa de tamanho → instruções de escala
   const sizeContext = {
-    tiny:   { neck: 'very small, delicate', bandana: '6-8cm wide when tied', bow: '3-4cm ribbon bow' },
-    small:  { neck: 'small',                bandana: '10-14cm wide when tied', bow: '5-7cm ribbon bow' },
-    medium: { neck: 'medium',               bandana: '16-22cm wide when tied', bow: '8-10cm ribbon bow' },
-    large:  { neck: 'large, thick',         bandana: '24-32cm wide when tied', bow: '12-14cm ribbon bow' },
-    giant:  { neck: 'very large, thick',    bandana: '35-45cm wide when tied', bow: '16-20cm ribbon bow' },
+    tiny:   { neck: 'very small and delicate', bandana: '6-8cm wide when tied',  bow: '3-4cm ribbon bow' },
+    small:  { neck: 'small',                   bandana: '10-14cm wide when tied', bow: '5-7cm ribbon bow' },
+    medium: { neck: 'medium',                  bandana: '16-22cm wide when tied', bow: '8-10cm ribbon bow' },
+    large:  { neck: 'large and thick',         bandana: '24-32cm wide when tied', bow: '12-14cm ribbon bow' },
+    giant:  { neck: 'very large and thick',    bandana: '35-45cm wide when tied', bow: '16-20cm ribbon bow' },
   };
-
   const sc = sizeContext[size] || sizeContext.medium;
 
-  // ── Bandana ──────────────────────────────────────────────────────────────────
   if (t.includes('bandana')) {
     return {
       placement: `wearing a bandana tied around the neck`,
       anchorNote: neckVisible
-        ? `The bandana knot sits at the center of the chest. The bandana is proportional to the dog's ${sc.neck} neck — approximately ${sc.bandana}. The fabric drapes naturally forming a triangle pointing down toward the chest.`
-        : `A bandana is tied around the neck, visible even if neck is partially hidden by fur. Knot at chest center.`,
-      styleBoost: `Exact fabric texture, print pattern and colors from the second image. The bandana fits snugly — not too loose, not too tight. Triangle tip reaches mid-chest.`,
-      critical: `The bandana MUST be sized correctly for a ${size} dog (${weightKg}kg). Do NOT make it oversized or undersized.`,
+        ? `The bandana knot sits at the center of the chest. Sized for a ${sc.neck} neck — approximately ${sc.bandana}. Fabric drapes naturally forming a triangle pointing down toward the chest.`
+        : `Bandana tied around the neck with knot at chest center, visible even through fur.`,
+      styleBoost: `Exact fabric texture, print pattern and colors from the second image. Fits snugly — not loose, not tight. Triangle tip reaches mid-chest.`,
+      critical: `MUST be sized correctly for a ${size} dog (${weightKg}kg). Not oversized, not undersized.`,
     };
   }
 
-  // ── Laço / Bow / Presilha ────────────────────────────────────────────────────
   if (t.includes('laço') || t.includes('laco') || t.includes('bow') || t.includes('presilha') || t.includes('hair')) {
     return {
-      placement: `with a decorative bow hair accessory on top of the head between the ears`,
+      placement: `with a decorative bow on top of the head between the ears`,
       anchorNote: headVisible
-        ? `The bow sits centered on top of the skull, between and slightly behind the ears. It is ${sc.bow} in size, proportional to the dog's head.`
-        : `Place a bow on top of the head area, centered between the ears, even if partially obscured.`,
-      styleBoost: `Exact ribbon texture, print and colors from the second image. The bow has two symmetrical loops and a center knot. It is clipped or tied to the fur — not floating.`,
-      critical: `Size the bow proportionally to a ${size} dog's head. It should look elegant, not oversized.`,
+        ? `Bow centered on top of the skull, between and slightly behind the ears. Size: ${sc.bow}, proportional to the dog's head.`
+        : `Bow placed on top of the head between the ears, even if partially hidden by fur.`,
+      styleBoost: `Exact ribbon texture, print and colors from the second image. Two symmetrical loops with a center knot. Clipped or tied to the fur — not floating.`,
+      critical: `Sized proportionally for a ${size} dog's head. Elegant, not oversized.`,
     };
   }
 
-  // ── Kit (bandana + laço) ─────────────────────────────────────────────────────
   if (t.includes('kit') || t.includes('conjunto') || t.includes('set')) {
     return {
       placement: `wearing a complete matching accessory set`,
-      anchorNote: `TWO accessories from the second image: (1) A bandana tied around the neck — knot at chest center, ${sc.bandana}, triangle draping down. (2) A matching bow on top of the head between the ears — ${sc.bow}, centered and clipped to fur. Both pieces use the exact same fabric pattern.`,
-      styleBoost: `Both accessories are perfectly coordinated — same print, same fabric, same colors as shown in the second image. Each is correctly proportioned for a ${size} dog.`,
-      critical: `BOTH accessories must be visible and correctly placed. Bandana on neck, bow on head. Sized for a ${size} (${weightKg}kg) dog.`,
+      anchorNote: `TWO accessories: (1) Bandana around the neck — knot at chest center, ${sc.bandana}, triangle draping down. (2) Matching bow on top of the head — ${sc.bow}, centered between ears. Both use the exact same fabric pattern from the second image.`,
+      styleBoost: `Both accessories perfectly coordinated — same print, same fabric, same colors. Each correctly proportioned for a ${size} dog.`,
+      critical: `BOTH must be visible and correctly placed. Bandana on neck, bow on head. Sized for ${size} (${weightKg}kg).`,
     };
   }
 
-  // ── Coleira / Collar ──────────────────────────────────────────────────────────
   if (t.includes('coleira') || t.includes('collar')) {
     return {
       placement: `wearing a collar around the neck`,
-      anchorNote: `The collar wraps around the ${sc.neck} neck, sitting flat against the fur. Hardware (buckle/tag) visible at front or side. Width proportional to the neck size.`,
-      styleBoost: `Exact material, color, hardware and texture from the second image. Collar fits properly — not too tight, slight natural sag.`,
-      critical: `Collar must fit a ${size} dog neck correctly. Leather/fabric texture must match the reference image exactly.`,
+      anchorNote: `Collar wraps around the ${sc.neck} neck, flat against the fur. Hardware visible at front or side.`,
+      styleBoost: `Exact material, color and hardware from the second image. Fits properly — slight natural sag.`,
+      critical: `Must fit a ${size} dog neck. Texture must match the reference exactly.`,
     };
   }
 
-  // ── Guia / Leash ─────────────────────────────────────────────────────────────
   if (t.includes('guia') || t.includes('lead') || t.includes('leash')) {
     return {
-      placement: `with a leash attached to the collar`,
-      anchorNote: `Collar and leash system visible. Leash attaches at front of collar and drapes naturally. Proportional to ${size} dog.`,
-      styleBoost: `Exact leash material, width and color from the second image. Hardware gleaming. Natural drape.`,
-      critical: `Both collar and leash must be correctly sized for a ${size} dog.`,
+      placement: `with a leash and collar`,
+      anchorNote: `Collar and leash visible. Leash attaches at front of collar and drapes naturally. Proportional to ${size} dog.`,
+      styleBoost: `Exact leash material, width and color from the second image. Hardware gleaming.`,
+      critical: `Correctly sized for a ${size} dog.`,
     };
   }
 
-  // ── Fallback genérico ─────────────────────────────────────────────────────────
   return {
     placement: `wearing ${productTitle} as an accessory`,
-    anchorNote: `The accessory is correctly fitted for a ${size} dog (${weightKg}kg). It is proportional and properly placed.`,
+    anchorNote: `Correctly fitted for a ${size} dog (${weightKg}kg).`,
     styleBoost: promptExtra || 'Accessory well-fitted and prominent.',
     critical: `Reproduce exact colors and textures from the second image.`,
   };
 }
 
-// ─── MONTA PROMPT FINAL DE FUSÃO ─────────────────────────────────────────────
 function buildFusionPrompt(petAnalysis, accessory) {
   const { breed, size, fur_color, fur_type, pose, animal_type } = petAnalysis;
-
   const petDesc = `${size} ${breed || animal_type} with ${fur_color || ''} ${fur_type || ''} fur, ${pose || 'sitting'}`;
 
   return [
-    // Preservação absoluta do animal
     `The subject is a ${petDesc} — keep this animal EXACTLY as it appears in the first image: same face, same markings, same fur color and texture, same body proportions, same pose, same background`,
-    // O que adicionar
     `${accessory.placement} from the second image`,
-    // Como ancorar e dimensionar
     accessory.anchorNote,
-    // Qualidade do produto
     accessory.styleBoost,
-    // Crítico de tamanho
     accessory.critical,
-    // Qualidade fotográfica
     `Professional pet fashion photography, soft natural lighting, sharp focus on both the animal's face and the accessory, photorealistic, high detail, 8k quality`,
   ].join('. ');
 }
@@ -211,25 +193,30 @@ export default async function handler(req, res) {
     console.log('   Pet URL:', petImageUrl);
     console.log('   Produto URL:', productRefUrl);
 
-    // ── STEP 2: Analisa o pet com visão ──────────────────────────────────────
-    console.log('STEP 2 → Analisando pet com LLaVA...');
+    // ── STEP 2: Analisa o pet com Claude Haiku (rápido, ~1s) ─────────────────
+    console.log('STEP 2 → Analisando pet com Claude Haiku...');
     let petAnalysis;
     try {
-      petAnalysis = await analyzePet(petImageUrl);
+      petAnalysis = await analyzePetWithClaude(petImageUrl);
       console.log('   Análise:', JSON.stringify(petAnalysis));
     } catch (visionErr) {
+      // Se falhar, continua com defaults — não bloqueia a geração
       console.warn('   Visão falhou, usando defaults:', visionErr.message);
-      petAnalysis = { is_pet: true, animal_type: 'dog', size: 'medium', weight_estimate_kg: 10, pose: 'sitting', neck_visible: true, head_top_visible: true };
+      petAnalysis = {
+        is_pet: true, animal_type: 'dog', breed: 'mixed breed',
+        size: 'medium', weight_estimate_kg: 10, pose: 'sitting',
+        neck_visible: true, head_top_visible: true,
+        fur_type: 'short', fur_color: 'mixed',
+      };
     }
 
-    // ── STEP 3: Valida se é um animal aceito ─────────────────────────────────
+    // ── STEP 3: Valida se é cachorro ou gato ─────────────────────────────────
     if (petAnalysis.is_pet === false || petAnalysis.animal_type === 'none') {
       return res.status(422).json({
         error: 'not_a_pet',
-        message: 'Não identificamos um cachorro ou gato na foto. Por favor, envie uma foto clara do seu pet.',
+        message: 'Não identificamos um cachorro ou gato na foto. Por favor, envie uma foto clara do seu pet com o rosto visível.',
       });
     }
-
     if (petAnalysis.animal_type !== 'dog' && petAnalysis.animal_type !== 'cat') {
       return res.status(422).json({
         error: 'unsupported_animal',
@@ -259,7 +246,6 @@ export default async function handler(req, res) {
         },
       };
       console.log('   Payload:', JSON.stringify(body, null, 2));
-
       const response = await fetch(
         'https://api.replicate.com/v1/models/flux-kontext-apps/multi-image-kontext-pro/predictions',
         {
@@ -274,11 +260,10 @@ export default async function handler(req, res) {
       predictionId = JSON.parse(responseText).id;
 
     } else {
-      const fallbackPrompt = buildFusionPrompt(petAnalysis, accessory).replace('from the second image', '');
       const body = {
         input: {
           input_image: petImageUrl,
-          prompt: fallbackPrompt,
+          prompt: fusionPrompt,
           output_format: 'jpg',
           safety_tolerance: 2,
           aspect_ratio: '1:1',
@@ -298,12 +283,7 @@ export default async function handler(req, res) {
     }
 
     console.log(`✅ Job disparado! predictionId: ${predictionId}`);
-    return res.status(200).json({
-      jobId: predictionId,
-      petImageUrl,
-      productRefUrl,
-      petAnalysis, // retorna para o frontend poder mostrar info de debug se precisar
-    });
+    return res.status(200).json({ jobId: predictionId, petImageUrl, productRefUrl, petAnalysis });
 
   } catch (error) {
     console.error('❌ Erro em /api/generate:', error);
