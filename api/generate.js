@@ -33,13 +33,11 @@ function buildPlacementContext(productTitle) {
 
 export default async function handler(req, res) {
   setCorsHeaders(res);
-
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ message: 'Método não permitido.' });
 
   try {
     const { imageBase64, productImageBase64, productTitle, promptExtra } = req.body;
-
     if (!imageBase64) return res.status(400).json({ error: 'Foto do pet obrigatória.' });
 
     // ── Upload paralelo para Cloudinary ──────────────────────────────────────
@@ -76,16 +74,15 @@ export default async function handler(req, res) {
     let predictionId;
 
     if (productRefUrl) {
-      // Multi-image: pet + produto
-      // NOTA: este modelo aceita apenas "jpg" ou "png" como output_format
+      // Multi-image: pet (input_image_1) + produto (input_image_2)
       const body = {
         input: {
-          image_1: petImageUrl,
-          image_2: productRefUrl,
+          input_image_1: petImageUrl,
+          input_image_2: productRefUrl,
           prompt: fusionPrompt,
           aspect_ratio: '1:1',
           safety_tolerance: 2,
-          output_format: 'jpg',   // webp não é suportado neste modelo
+          output_format: 'jpg',
         },
       };
 
@@ -106,15 +103,12 @@ export default async function handler(req, res) {
       const responseText = await response.text();
       console.log(`   Replicate response ${response.status}:`, responseText);
 
-      if (!response.ok) {
-        throw new Error(`Replicate multi-image error ${response.status}: ${responseText}`);
-      }
+      if (!response.ok) throw new Error(`Replicate multi-image error ${response.status}: ${responseText}`);
 
-      const prediction = JSON.parse(responseText);
-      predictionId = prediction.id;
+      predictionId = JSON.parse(responseText).id;
 
     } else {
-      // Fallback single-image
+      // Fallback single-image: só o pet
       const fallbackPrompt = [
         `Add ${ctx.placement} to the dog in this photo`,
         `The accessory: ${productDetails}`,
@@ -128,7 +122,6 @@ export default async function handler(req, res) {
           input_image: petImageUrl,
           prompt: fallbackPrompt,
           output_format: 'jpg',
-          output_quality: 92,
           safety_tolerance: 2,
           aspect_ratio: '1:1',
         },
@@ -149,12 +142,9 @@ export default async function handler(req, res) {
       const responseText = await response.text();
       console.log(`   Replicate fallback response ${response.status}:`, responseText);
 
-      if (!response.ok) {
-        throw new Error(`Replicate single-image error ${response.status}: ${responseText}`);
-      }
+      if (!response.ok) throw new Error(`Replicate single-image error ${response.status}: ${responseText}`);
 
-      const prediction = JSON.parse(responseText);
-      predictionId = prediction.id;
+      predictionId = JSON.parse(responseText).id;
     }
 
     console.log(`✅ Job disparado! predictionId: ${predictionId}`);
