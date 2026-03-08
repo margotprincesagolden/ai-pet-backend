@@ -3,11 +3,11 @@ import Replicate from 'replicate';
 import Cors from 'cors';
 
 // ============================================================
-//  MARGOT & MARGARIDAS — AI Pet Studio v3.0
-//  Pipeline: FLUX.1 Kontext Pro (edição com identidade preservada)
-//  Modelo Principal: black-forest-labs/flux-kontext-pro
-//  Estratégia: edita a foto REAL do pet adicionando o acessório
-//  → cachorro idêntico ao original, acessório correto e fiel
+//  MARGOT & MARGARIDAS — AI Pet Studio v4.0
+//  Pipeline: flux-kontext-apps/multi-image-kontext-pro
+//  Estratégia: passa DUAS imagens reais (pet + produto) para a IA
+//  → cachorro idêntico ao original + produto visualmente fiel
+//  → mesmo resultado que o ChatGPT com duas imagens
 // ============================================================
 
 const cors = Cors({
@@ -130,94 +130,104 @@ export default async function handler(req, res) {
       console.log("   Produto URL:", productRefUrl);
     }
 
-    // ── STEP 3: Construção do Prompt de Edição ──
-    // Kontext edita a foto REAL — então o prompt instrui "o que adicionar/mudar"
-    // NÃO precisa descrever o cachorro — ele já está na imagem
-    console.log("STEP 3 → Construindo prompt de edição para Kontext...");
+    // ── STEP 3: Construção do Prompt de Fusão ──
+    // Multi-image Kontext recebe as DUAS fotos reais — pet e produto
+    // O prompt instrui COMO unir as duas, sem inventar nada
+    console.log("STEP 3 → Construindo prompt de fusão...");
     const ctx = buildPlacementContext(productTitle || "", promptExtra || "");
-
     const productDetails = promptExtra ? promptExtra : productTitle;
 
-    // Prompt de edição: instrução clara do que fazer na foto
-    // Kontext entende linguagem natural de edição ("add X to Y", "keep everything else")
-    const editPrompt = [
-      // Instrução de edição direta
-      `Add ${ctx.placement} to the dog in this photo`,
-      // Detalhes visuais do acessório
-      `The accessory is ${productDetails}`,
-      // Instruções de qualidade do produto
+    // Prompt de fusão: referencia "first image" (pet) e "second image" (produto)
+    // Kontext entende essa linguagem para saber o papel de cada imagem
+    const fusionPrompt = [
+      // Âncora do pet (primeira imagem)
+      `Keep the dog from the first image exactly as it is — same breed, fur, face, expression and pose`,
+      // Âncora do produto (segunda imagem)
+      `Take the accessory from the second image and place it on the dog: ${ctx.placement}`,
+      // Detalhe específico do produto
+      `Reproduce the exact colors, fabric, pattern and texture of the accessory from the second image`,
+      // Instruções de qualidade
       ctx.styleBoost,
-      // Preservação do animal
-      "Keep the dog's appearance, breed, fur, face and pose exactly the same",
-      // Qualidade final
-      "Professional pet photography lighting, sharp focus, photorealistic"
+      // Estilo fotográfico final
+      `Professional pet fashion photography, soft studio lighting, sharp focus on face and accessory, photorealistic, 8k quality`
     ].join(". ");
 
-    console.log("   Prompt de edição:", editPrompt);
+    console.log("   Prompt de fusão:", fusionPrompt);
 
-    // ── STEP 4: Edição com FLUX.1 Kontext Pro ──
-    // ESTRATÉGIA CORRETA: Kontext recebe a foto real do pet e adiciona o acessório
-    // O cachorro permanece 100% idêntico ao original — só o acessório é adicionado
-    console.log("STEP 4 → Editando foto com FLUX.1 Kontext Pro...");
+    // ── STEP 4: Fusão com multi-image-kontext-pro ──
+    // Modelo recebe pet (image_1) + produto (image_2) + prompt
+    // Resultado: o cachorro real usando o produto real
+    console.log("STEP 4 → Fundindo imagens com multi-image-kontext-pro...");
+
+    // Garante que temos a imagem do produto — obrigatória aqui
+    if (!productRefUrl) {
+      throw new Error("Imagem do produto obrigatória para a fusão multi-imagem.");
+    }
 
     let generatedImageUrl;
 
-    // Kontext Pro — chamada via modelo com slug direto (sem version hash necessário)
-    async function runKontextPro(inputImageUrl, prompt) {
-      const response = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-kontext-pro/predictions", {
+    async function runMultiImageKontext(petUrl, productUrl, prompt) {
+      const response = await fetch("https://api.replicate.com/v1/models/flux-kontext-apps/multi-image-kontext-pro/predictions", {
         method: "POST",
         headers: {
           "Authorization": `Token ${process.env.REPLICATE_API_TOKEN}`,
           "Content-Type": "application/json",
-          "Prefer": "wait"
         },
         body: JSON.stringify({
           input: {
-            input_image: inputImageUrl,
-            prompt: prompt,
-            output_format: "webp",
-            output_quality: 95,
+            image_1: petUrl,       // Foto real do cachorro do cliente
+            image_2: productUrl,   // Foto real do produto da loja
+            prompt: fusionPrompt,
+            aspect_ratio: "1:1",
             safety_tolerance: 2,
-            aspect_ratio: "1:1"
+            output_format: "webp",
+            output_quality: 95
           }
         }),
       });
 
       if (!response.ok) {
         const errDesc = await response.text();
-        throw new Error(`Kontext API Error ${response.status}: ${errDesc}`);
+        throw new Error(`Multi-Image Kontext API Error ${response.status}: ${errDesc}`);
       }
 
       let prediction = await response.json();
       const predictionId = prediction.id;
 
-      // Polling até terminar
       while (prediction.status !== "succeeded" && prediction.status !== "failed") {
         await new Promise(r => setTimeout(r, 1500));
         const poll = await fetch(`https://api.replicate.com/v1/predictions/${predictionId}`, {
           headers: { "Authorization": `Token ${process.env.REPLICATE_API_TOKEN}` }
         });
         prediction = await poll.json();
-        console.log(`   [Kontext Polling] status: ${prediction.status}`);
+        console.log(`   [Multi-Kontext Polling] status: ${prediction.status}`);
       }
 
       if (prediction.status === "failed") {
-        throw new Error("Kontext falhou: " + prediction.error);
+        throw new Error("Multi-Image Kontext falhou: " + prediction.error);
       }
 
       return prediction.output;
     }
 
     try {
-      const kontextOutput = await runKontextPro(petImageUrl, editPrompt);
-      generatedImageUrl = Array.isArray(kontextOutput) ? kontextOutput[0] : kontextOutput;
-      console.log("   Kontext Pro sucesso:", generatedImageUrl);
+      const multiOutput = await runMultiImageKontext(petImageUrl, productRefUrl, fusionPrompt);
+      generatedImageUrl = Array.isArray(multiOutput) ? multiOutput[0] : multiOutput;
+      console.log("   Multi-Image Kontext Pro sucesso:", generatedImageUrl);
 
-    } catch (kontextError) {
-      // Fallback: Kontext Dev (open-weight, sem custo de licença)
-      console.warn("   Kontext Pro falhou, tentando Kontext Dev...", kontextError.message);
+    } catch (multiError) {
+      // Fallback: Kontext Pro com apenas a foto do pet (sem a ref do produto)
+      console.warn("   Multi-Image falhou, usando Kontext Pro single-image como fallback...", multiError.message);
 
-      const devResponse = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-kontext-dev/predictions", {
+      const fallbackPrompt = [
+        `Add ${ctx.placement} to the dog in this photo`,
+        `The accessory details: ${productDetails}`,
+        ctx.styleBoost,
+        `Keep the dog's appearance exactly the same`,
+        `Professional pet photography, photorealistic`
+      ].join(". ");
+
+      const fbResponse = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-kontext-pro/predictions", {
         method: "POST",
         headers: {
           "Authorization": `Token ${process.env.REPLICATE_API_TOKEN}`,
@@ -226,32 +236,32 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           input: {
             input_image: petImageUrl,
-            prompt: editPrompt,
+            prompt: fallbackPrompt,
             output_format: "webp",
-            output_quality: 90,
-            num_inference_steps: 28,
-            guidance: 3.5
+            output_quality: 92,
+            safety_tolerance: 2,
+            aspect_ratio: "1:1"
           }
         }),
       });
 
-      let devPrediction = await devResponse.json();
-      const devId = devPrediction.id;
+      let fbPrediction = await fbResponse.json();
+      const fbId = fbPrediction.id;
 
-      while (devPrediction.status !== "succeeded" && devPrediction.status !== "failed") {
+      while (fbPrediction.status !== "succeeded" && fbPrediction.status !== "failed") {
         await new Promise(r => setTimeout(r, 1500));
-        const poll = await fetch(`https://api.replicate.com/v1/predictions/${devId}`, {
+        const poll = await fetch(`https://api.replicate.com/v1/predictions/${fbId}`, {
           headers: { "Authorization": `Token ${process.env.REPLICATE_API_TOKEN}` }
         });
-        devPrediction = await poll.json();
-        console.log(`   [Kontext Dev Polling] status: ${devPrediction.status}`);
+        fbPrediction = await poll.json();
+        console.log(`   [Fallback Polling] status: ${fbPrediction.status}`);
       }
 
-      if (devPrediction.status === "failed") throw new Error("Kontext Dev também falhou: " + devPrediction.error);
+      if (fbPrediction.status === "failed") throw new Error("Fallback também falhou: " + fbPrediction.error);
 
-      const devOutput = devPrediction.output;
-      generatedImageUrl = Array.isArray(devOutput) ? devOutput[0] : devOutput;
-      console.log("   Kontext Dev fallback sucesso:", generatedImageUrl);
+      const fbOutput = fbPrediction.output;
+      generatedImageUrl = Array.isArray(fbOutput) ? fbOutput[0] : fbOutput;
+      console.log("   Fallback Kontext Pro sucesso:", generatedImageUrl);
     }
 
     // ── STEP 5: Salva resultado no Cloudinary ──
@@ -271,7 +281,7 @@ export default async function handler(req, res) {
       generatedImage: finalResult.secure_url,
       originalPet: petImageUrl,
       productRef: productRefUrl,
-      promptUsed: editPrompt  // Debug helper — remova em produção
+      promptUsed: fusionPrompt  // Debug helper — remova em produção
     });
 
   } catch (error) {
