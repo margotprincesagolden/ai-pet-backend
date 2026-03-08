@@ -84,16 +84,18 @@ export default async function handler(req, res) {
 
     // Mudamos o modelo do básico (Image2Image normal) para um que aceita IP-Adapter
     // O hysts/ip-adapter-sdxl injeta a imagem de referência (produto) direto na geração
+    // Replicate: using the official and stable zsxkib/ip-adapter-sdxl 
+    // Que aceita a foto do pet (image) e a foto do produto (ip_adapter_image)
     const output = await replicate.run(
-      "hysts/ip-adapter-sdxl:8e29a8a7061b4db1b369cc24d101d7e283ab2964fe5fac1136b6fba30da57f07",
+      "zsxkib/ip-adapter-sdxl:8f1fb14eb85c613043d87db8dd1341c38d380f7ad016ce265f2425d487f94cd3",
       {
         input: {
-          image: originalPetUrl,                // A foto base (o Cachorro)
-          ip_adapter_image: productRefUrl,      // A foto referência (o Laço/Bandana) para roubar cor/tecido
-          prompt: finalPrompt,                  // Direcionamento lógico de onde a peça vai
+          image: originalPetUrl,
+          ip_adapter_image: productRefUrl,
+          prompt: finalPrompt,
           negative_prompt: negativePrompt,
-          scale: 0.65,                          // Força da textura do produto
-          control_scale: 0.70,                  // Manter a estrutura do cachorro intacta
+          scale: 0.65,
+          control_scale: 0.70,
           num_outputs: 1,
           num_inference_steps: 40
         }
