@@ -1,5 +1,4 @@
 import { v2 as cloudinary } from 'cloudinary';
-import Cors from 'cors';
 
 // ============================================================
 //  /api/status?id=PREDICTION_ID
@@ -9,15 +8,11 @@ import Cors from 'cors';
 
 export const maxDuration = 10;
 
-const cors = Cors({ methods: ['GET', 'HEAD', 'OPTIONS'], origin: '*' });
-
-function runMiddleware(req, res, fn) {
-  return new Promise((resolve, reject) => {
-    fn(req, res, (result) => {
-      if (result instanceof Error) return reject(result);
-      return resolve(result);
-    });
-  });
+function setCorsHeaders(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS, HEAD');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Max-Age', '86400');
 }
 
 cloudinary.config({
@@ -27,20 +22,22 @@ cloudinary.config({
 });
 
 export default async function handler(req, res) {
-  await runMiddleware(req, res, cors);
+  setCorsHeaders(res);
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
 
   if (req.method !== 'GET') {
     return res.status(405).json({ message: 'Método não permitido.' });
   }
 
   const { id } = req.query;
-
   if (!id) {
     return res.status(400).json({ error: 'Parâmetro ?id= obrigatório.' });
   }
 
   try {
-    // Consulta o status do job no Replicate (operação instantânea)
     const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${id}`, {
       headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` },
     });
@@ -53,20 +50,14 @@ export default async function handler(req, res) {
     const prediction = await pollRes.json();
     console.log(`[Status] id=${id} status=${prediction.status}`);
 
-    // Ainda processando — frontend vai perguntar de novo em 2s
     if (prediction.status === 'starting' || prediction.status === 'processing') {
       return res.status(200).json({ status: 'processing' });
     }
 
-    // Falhou
     if (prediction.status === 'failed') {
-      return res.status(200).json({
-        status: 'failed',
-        error: prediction.error || 'A IA não conseguiu gerar a imagem.',
-      });
+      return res.status(200).json({ status: 'failed', error: prediction.error || 'A IA não conseguiu gerar a imagem.' });
     }
 
-    // Sucesso — salva no Cloudinary e retorna URL permanente
     if (prediction.status === 'succeeded') {
       const rawOutput = prediction.output;
       const generatedUrl = Array.isArray(rawOutput) ? rawOutput[0] : rawOutput;
@@ -75,23 +66,16 @@ export default async function handler(req, res) {
         return res.status(200).json({ status: 'failed', error: 'Output vazio do Replicate.' });
       }
 
-      console.log(`[Status] Salvando resultado no Cloudinary...`);
+      console.log(`[Status] Salvando no Cloudinary...`);
       const saved = await cloudinary.uploader.upload(generatedUrl, {
         folder: 'mm_generated_results',
-        transformation: [
-          { width: 1200, height: 1200, crop: 'limit' },
-          { quality: 'auto:best', fetch_format: 'auto' },
-        ],
+        transformation: [{ width: 1200, height: 1200, crop: 'limit' }, { quality: 'auto:best', fetch_format: 'auto' }],
       });
 
-      console.log(`✅ Resultado salvo: ${saved.secure_url}`);
-      return res.status(200).json({
-        status: 'succeeded',
-        imageUrl: saved.secure_url,
-      });
+      console.log(`✅ Salvo: ${saved.secure_url}`);
+      return res.status(200).json({ status: 'succeeded', imageUrl: saved.secure_url });
     }
 
-    // Status desconhecido (ex: "canceled")
     return res.status(200).json({ status: 'failed', error: `Status inesperado: ${prediction.status}` });
 
   } catch (error) {
