@@ -2,13 +2,19 @@ import { v2 as cloudinary } from 'cloudinary';
 import Replicate from 'replicate';
 import Cors from 'cors';
 
-// Middleware do CORS (Shopify -> Vercel)
+// ============================================================
+//  MARGOT & MARGARIDAS — AI Pet Studio v3.0
+//  Pipeline: FLUX.1 Kontext Pro (edição com identidade preservada)
+//  Modelo Principal: black-forest-labs/flux-kontext-pro
+//  Estratégia: edita a foto REAL do pet adicionando o acessório
+//  → cachorro idêntico ao original, acessório correto e fiel
+// ============================================================
+
 const cors = Cors({
   methods: ['POST', 'GET', 'HEAD', 'OPTIONS'],
   origin: '*'
 });
 
-// Helper de Execução Middleware
 function runMiddleware(req, res, fn) {
   return new Promise((resolve, reject) => {
     fn(req, res, (result) => {
@@ -18,19 +24,75 @@ function runMiddleware(req, res, fn) {
   });
 }
 
-// Configura o Cloudinary Seguramente via .env
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
-// Autentica no Replicate
 const replicate = new Replicate({
   auth: process.env.REPLICATE_API_TOKEN,
 });
 
-// O Sistema Principal de Geração (Advanced IP-Adapter & Smart Dictionary)
+// ─── DICIONÁRIO DE ACESSÓRIOS ─────────────────────────────────────────────────
+// Define onde e como cada peça aparece no corpo do pet
+function buildPlacementContext(productTitle, promptExtra) {
+  const t = productTitle.toLowerCase();
+
+  const placements = [
+    {
+      keywords: ["bandana"],
+      placement: "wearing a bandana tied around the neck",
+      focus: "neck accessory, bandana visible and prominent",
+      styleBoost: "fabric texture clearly visible, knot centered on chest"
+    },
+    {
+      keywords: ["coleira", "collar"],
+      placement: "wearing a collar around the neck",
+      focus: "collar clearly visible around neck",
+      styleBoost: "collar fit snugly, hardware and texture sharp"
+    },
+    {
+      keywords: ["guia", "lead", "leash"],
+      placement: "with a leash attached to collar",
+      focus: "leash and collar system visible",
+      styleBoost: "hardware gleaming, leash draping naturally"
+    },
+    {
+      keywords: ["laço", "laco", "bow", "presilha", "hair", "topknot"],
+      placement: "with a bow placed on top of the head between the ears",
+      focus: "hair bow on head as focal point",
+      styleBoost: "bow centered between ears, ribbon symmetrical"
+    },
+    {
+      keywords: ["kit", "conjunto", "set"],
+      placement: "wearing a matching accessory set: bandana around the neck and a bow on top of the head",
+      focus: "coordinated matching accessories",
+      styleBoost: "both pieces visible, same fabric pattern connecting them"
+    },
+    {
+      keywords: ["mochila", "bag", "backpack"],
+      placement: "wearing a small pet backpack on the back",
+      focus: "backpack straps and body visible",
+      styleBoost: "backpack properly fitted, straps symmetrical"
+    },
+  ];
+
+  for (const entry of placements) {
+    if (entry.keywords.some(k => t.includes(k))) {
+      return entry;
+    }
+  }
+
+  // Fallback genérico
+  return {
+    placement: `wearing ${productTitle} as an accessory`,
+    focus: "accessory clearly visible on pet",
+    styleBoost: "accessory well-fitted and prominent"
+  };
+}
+
+// ─── HANDLER PRINCIPAL ────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   await runMiddleware(req, res, cors);
 
@@ -39,130 +101,184 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Agora recebemos a foto do Pet E do Produto vindo da Shopify
     const { imageBase64, productImageBase64, productTitle, promptExtra } = req.body;
 
-    if (!imageBase64 || !productImageBase64) {
-      return res.status(400).json({ error: 'Faltam imagens (Pet ou Produto) para a mágica.' });
+    if (!imageBase64) {
+      return res.status(400).json({ error: 'Foto do pet obrigatória.' });
     }
 
-    console.log("1. Fazendo upload de ambas as fotos para o Cloudinary...");
+    // ── STEP 1: Upload do pet para o Cloudinary (necessário para URL pública) ──
+    console.log("STEP 1 → Upload do pet para Cloudinary...");
+    const petUpload = await cloudinary.uploader.upload(imageBase64, {
+      folder: 'mm_pet_uploads',
+      transformation: [
+        { width: 1024, height: 1024, crop: 'limit' }, // Limita tamanho para otimizar
+        { quality: 'auto:best' }
+      ]
+    });
+    const petImageUrl = petUpload.secure_url;
+    console.log("   Pet URL:", petImageUrl);
 
-    // Sobe a foto do Cachorro
-    const petUpload = await cloudinary.uploader.upload(imageBase64, { folder: 'ai_pet_uploads' });
-    const originalPetUrl = petUpload.secure_url;
-
-    // Sobe a foto do Produto Original (Referência Material/Cor para a IA)
-    const productUpload = await cloudinary.uploader.upload(productImageBase64, { folder: 'ai_product_refs' });
-    const productRefUrl = productUpload.secure_url;
-
-    console.log("2. Aplicando o SMART PLACEMENT DICTIONARY...");
-    let placementPrompt = "";
-    let basePrompt = "A highly detailed, professional studio photography of a cute pet";
-    const titleLower = productTitle.toLowerCase();
-
-    // Dicionário de Posicionamento Lógico
-    if (titleLower.includes("bandana") || titleLower.includes("coleira") || titleLower.includes("guia")) {
-      placementPrompt = "perfectly wrapped around the pet's neck, neckwear focus";
-    }
-    else if (titleLower.includes("laço") || titleLower.includes("laco") || titleLower.includes("presilha")) {
-      placementPrompt = "placed elegantly on top of the pet's head, between the ears, hair accessory focus";
-    }
-    else if (titleLower.includes("kit")) {
-      placementPrompt = "wearing matching accessories around the neck and on top of the head";
-    }
-    else {
-      // Fallback se não detectar
-      placementPrompt = "wearing the accessory beautifully";
+    // ── STEP 2: Upload do produto (se disponível) ──
+    let productRefUrl = null;
+    if (productImageBase64) {
+      console.log("STEP 2 → Upload da referência do produto...");
+      const prodUpload = await cloudinary.uploader.upload(productImageBase64, {
+        folder: 'mm_product_refs'
+      });
+      productRefUrl = prodUpload.secure_url;
+      console.log("   Produto URL:", productRefUrl);
     }
 
-    // Helper para rodar Replicate via FETCH nativo (bypass no SDK antigo da Vercel)
-    async function runReplicate(version, input) {
-      const response = await fetch("https://api.replicate.com/v1/predictions", {
+    // ── STEP 3: Construção do Prompt de Edição ──
+    // Kontext edita a foto REAL — então o prompt instrui "o que adicionar/mudar"
+    // NÃO precisa descrever o cachorro — ele já está na imagem
+    console.log("STEP 3 → Construindo prompt de edição para Kontext...");
+    const ctx = buildPlacementContext(productTitle || "", promptExtra || "");
+
+    const productDetails = promptExtra ? promptExtra : productTitle;
+
+    // Prompt de edição: instrução clara do que fazer na foto
+    // Kontext entende linguagem natural de edição ("add X to Y", "keep everything else")
+    const editPrompt = [
+      // Instrução de edição direta
+      `Add ${ctx.placement} to the dog in this photo`,
+      // Detalhes visuais do acessório
+      `The accessory is ${productDetails}`,
+      // Instruções de qualidade do produto
+      ctx.styleBoost,
+      // Preservação do animal
+      "Keep the dog's appearance, breed, fur, face and pose exactly the same",
+      // Qualidade final
+      "Professional pet photography lighting, sharp focus, photorealistic"
+    ].join(". ");
+
+    console.log("   Prompt de edição:", editPrompt);
+
+    // ── STEP 4: Edição com FLUX.1 Kontext Pro ──
+    // ESTRATÉGIA CORRETA: Kontext recebe a foto real do pet e adiciona o acessório
+    // O cachorro permanece 100% idêntico ao original — só o acessório é adicionado
+    console.log("STEP 4 → Editando foto com FLUX.1 Kontext Pro...");
+
+    let generatedImageUrl;
+
+    // Kontext Pro — chamada via modelo com slug direto (sem version hash necessário)
+    async function runKontextPro(inputImageUrl, prompt) {
+      const response = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-kontext-pro/predictions", {
         method: "POST",
         headers: {
           "Authorization": `Token ${process.env.REPLICATE_API_TOKEN}`,
           "Content-Type": "application/json",
+          "Prefer": "wait"
         },
-        body: JSON.stringify({ version, input }),
+        body: JSON.stringify({
+          input: {
+            input_image: inputImageUrl,
+            prompt: prompt,
+            output_format: "webp",
+            output_quality: 95,
+            safety_tolerance: 2,
+            aspect_ratio: "1:1"
+          }
+        }),
       });
 
       if (!response.ok) {
         const errDesc = await response.text();
-        throw new Error(`API Error ${response.status}: ${errDesc}`);
+        throw new Error(`Kontext API Error ${response.status}: ${errDesc}`);
       }
 
       let prediction = await response.json();
       const predictionId = prediction.id;
 
-      // Polling loop
+      // Polling até terminar
       while (prediction.status !== "succeeded" && prediction.status !== "failed") {
-        await new Promise(r => setTimeout(r, 1000));
-        const pollResponse = await fetch(`https://api.replicate.com/v1/predictions/${predictionId}`, {
+        await new Promise(r => setTimeout(r, 1500));
+        const poll = await fetch(`https://api.replicate.com/v1/predictions/${predictionId}`, {
           headers: { "Authorization": `Token ${process.env.REPLICATE_API_TOKEN}` }
         });
-        prediction = await pollResponse.json();
+        prediction = await poll.json();
+        console.log(`   [Kontext Polling] status: ${prediction.status}`);
       }
 
       if (prediction.status === "failed") {
-        throw new Error("Geração falhou: " + prediction.error);
+        throw new Error("Kontext falhou: " + prediction.error);
       }
 
       return prediction.output;
     }
 
-    // Unindo toda a lógica textual
-    const finalPrompt = `${basePrompt} ${placementPrompt}, the accessory is ${promptExtra}, exact material and pattern as the reference, luxury e-commerce product shot, soft studio lighting, 8k resolution, photorealistic, cinematic, sharp focus`;
-    const negativePrompt = "ugly, blurry, deformed face, bad anatomy, human hands, text, watermark, cartoon, animated, low res, oversaturated, messy fur, floating accessories";
+    try {
+      const kontextOutput = await runKontextPro(petImageUrl, editPrompt);
+      generatedImageUrl = Array.isArray(kontextOutput) ? kontextOutput[0] : kontextOutput;
+      console.log("   Kontext Pro sucesso:", generatedImageUrl);
 
-    console.log("3. Analisando a foto do Cachorro com Visão LLaVA (Para recriar)...");
+    } catch (kontextError) {
+      // Fallback: Kontext Dev (open-weight, sem custo de licença)
+      console.warn("   Kontext Pro falhou, tentando Kontext Dev...", kontextError.message);
 
-    // Passo A: A IA Analisa o cachorro real e escreve uma descrição detalhada dele
-    const visionOutput = await runReplicate(
-      "x5pthttb2mghadkxlvymeprkce", // LLaVA 13b Version Hash Seguro
-      {
-        image: originalPetUrl,
-        prompt: "Describe this dog in extreme detail: breed, fur color, expression, pose, and the exact background environment. Be concise and descriptive.",
-        max_tokens: 150
+      const devResponse = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-kontext-dev/predictions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Token ${process.env.REPLICATE_API_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          input: {
+            input_image: petImageUrl,
+            prompt: editPrompt,
+            output_format: "webp",
+            output_quality: 90,
+            num_inference_steps: 28,
+            guidance: 3.5
+          }
+        }),
+      });
+
+      let devPrediction = await devResponse.json();
+      const devId = devPrediction.id;
+
+      while (devPrediction.status !== "succeeded" && devPrediction.status !== "failed") {
+        await new Promise(r => setTimeout(r, 1500));
+        const poll = await fetch(`https://api.replicate.com/v1/predictions/${devId}`, {
+          headers: { "Authorization": `Token ${process.env.REPLICATE_API_TOKEN}` }
+        });
+        devPrediction = await poll.json();
+        console.log(`   [Kontext Dev Polling] status: ${devPrediction.status}`);
       }
-    );
 
-    // Junta a resposta do LLaVA (Array de strings -> String única)
-    const dogDescription = Array.isArray(visionOutput) ? visionOutput.join("") : visionOutput;
-    console.log("-> Cão mapeado:", dogDescription);
+      if (devPrediction.status === "failed") throw new Error("Kontext Dev também falhou: " + devPrediction.error);
 
-    console.log("4. Criando Arte Mágica Final com Seedream-4...");
+      const devOutput = devPrediction.output;
+      generatedImageUrl = Array.isArray(devOutput) ? devOutput[0] : devOutput;
+      console.log("   Kontext Dev fallback sucesso:", generatedImageUrl);
+    }
 
-    // Passo B: Fundimos a descrição real do cão com o detalhamento de luxo do produto
-    const seedreamPrompt = `A stunning, hyper-realistic tracking shot of ${dogDescription}. The dog is ${placementPrompt} a ${productTitle}. The accessory details: ${promptExtra}. Matches the exact material and pattern of a high-end fashion piece. 8k resolution, photorealistic masterpiece, natural lighting.`;
-
-    // O modelo aprovado pelo cliente: Bytedance Seedream 4 (Altíssima qualidade de síntese)
-    const output = await runReplicate(
-      "cf7d431991436f19d1c8dad83fe463c729c816d7a21056c5105e75c84a0aa7e9", // Seedream 4 Version Hash Oficial
-      {
-        prompt: seedreamPrompt,
-        size: "2K",
-        max_images: 1
-      }
-    );
-
-    const generatedImageUrl = Array.isArray(output) ? output[0] : output; // Retorno do Seedream
-
-    console.log("5. Salvando a arte final...");
+    // ── STEP 5: Salva resultado no Cloudinary ──
+    console.log("STEP 5 → Salvando resultado no Cloudinary...");
     const finalResult = await cloudinary.uploader.upload(generatedImageUrl, {
-      folder: 'ai_pet_generated',
+      folder: 'mm_generated_results',
+      transformation: [
+        { width: 1200, height: 1200, crop: 'limit' },
+        { quality: 'auto:best', fetch_format: 'auto' }
+      ]
     });
+
+    console.log("✅ Pipeline concluído com sucesso!");
 
     return res.status(200).json({
       success: true,
       generatedImage: finalResult.secure_url,
-      originalPet: originalPetUrl,
-      productRef: productRefUrl
+      originalPet: petImageUrl,
+      productRef: productRefUrl,
+      promptUsed: editPrompt  // Debug helper — remova em produção
     });
 
   } catch (error) {
-    console.error("Erro Crítico no Pipeline de IA:", error);
-    // VAZANDO O ERRO EXATO PARA A SHOPIFY PARA DEBUGGING IMEDIATO
-    return res.status(500).json({ error: `Vercel Pipeline Error: ${error.message}` });
+    console.error("❌ Erro crítico no pipeline:", error);
+    return res.status(500).json({
+      error: `Pipeline Error: ${error.message}`,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 }
