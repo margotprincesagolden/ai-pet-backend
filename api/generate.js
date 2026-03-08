@@ -80,23 +80,20 @@ export default async function handler(req, res) {
     const finalPrompt = `${basePrompt} ${placementPrompt}, the accessory is ${promptExtra}, exact material and pattern as the reference, luxury e-commerce product shot, soft studio lighting, 8k resolution, photorealistic, cinematic, sharp focus`;
     const negativePrompt = "ugly, blurry, deformed face, bad anatomy, human hands, text, watermark, cartoon, animated, low res, oversaturated, messy fur, floating accessories";
 
-    console.log("3. Chamando Motor Avançado com Fusão de Imagem (IP-Adapter/SDXL)...");
+    console.log("3. Chamando Motor Estável (SDXL Image-to-Image c/ Smart Prompt)...");
 
-    // Mudamos o modelo do básico (Image2Image normal) para um que aceita IP-Adapter
-    // O hysts/ip-adapter-sdxl injeta a imagem de referência (produto) direto na geração
-    // Replicate: using the official and stable zsxkib/ip-adapter-sdxl 
-    // Que aceita a foto do pet (image) e a foto do produto (ip_adapter_image)
+    // Devido à instabilidade recente dos modelos IP-Adapter públicos no Replicate (Erro 422),
+    // voltamos para a âncora principal (SDXL) usando a foto base + injeção pesada do Dicionário
     const output = await replicate.run(
-      "zsxkib/ip-adapter-sdxl:8f1fb14eb85c613043d87db8dd1341c38d380f7ad016ce265f2425d487f94cd3",
+      "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
       {
         input: {
-          image: originalPetUrl,
-          ip_adapter_image: productRefUrl,
           prompt: finalPrompt,
           negative_prompt: negativePrompt,
-          scale: 0.65,
-          control_scale: 0.70,
+          image: originalPetUrl,
+          prompt_strength: 0.72, // 72% de liberdade para a IA modelar o acessório
           num_outputs: 1,
+          scheduler: "K_EULER",
           num_inference_steps: 40
         }
       }
