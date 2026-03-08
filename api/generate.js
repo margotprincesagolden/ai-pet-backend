@@ -84,7 +84,7 @@ export default async function handler(req, res) {
 
     // Passo A: A IA Analisa o cachorro real e escreve uma descrição detalhada dele
     const visionOutput = await replicate.run(
-      "yorickvp/llava-13b:b5f621affc37f12539a441e3c11396a31173bb23f79ef9ae521714fc2ee81a26",
+      "yorickvp/llava-13b", // Remoção da string de versão manual (estava expirada)
       {
         input: {
           image: originalPetUrl,
@@ -105,11 +105,11 @@ export default async function handler(req, res) {
 
     // O modelo aprovado pelo cliente: Bytedance Seedream 4 (Altíssima qualidade de síntese)
     const output = await replicate.run(
-      "bytedance/seedream-4:cf7d431991436f19d1c8dad83fe463c729c816d7a21056c5105e75c84a0aa7e9",
+      "bytedance/seedream-4", // Auto-fetch da versão funcional mais recente
       {
         input: {
           prompt: seedreamPrompt,
-          size: "1024x1024", // Formato HQ
+          size: "2K", // Seedream aceita apenas string de 1K, 2K ou 4K (NÃO aceita 1024x1024)
           max_images: 1
         }
       }
