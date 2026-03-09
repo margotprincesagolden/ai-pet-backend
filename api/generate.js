@@ -1,7 +1,7 @@
 import { v2 as cloudinary } from 'cloudinary';
 
-// Pipeline: Claude Haiku → Grounding DINO (bbox) → SAM2 (máscara) → SDXL Inpainting
-// Preserva o pet pixel a pixel — só pinta a região do acessório
+// Pipeline: Claude Haiku (análise) → Cloudinary (upload) → Nano Banana via fal.ai (edição nativa)
+// Nano Banana = Gemini 2.5 Flash Image — compreensão visual nativa, sem negative prompts
 export const maxDuration = 120;
 
 function setCorsHeaders(res) {
@@ -17,63 +17,10 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// ─── HELPERS ─────────────────────────────────────────────────────────────────
-const getMime   = b => (b.match(/^data:(image\/[\w+]+);base64,/) || [])[1] || 'image/jpeg';
-const stripB64  = b => b.replace(/^data:image\/\w+;base64,/, '');
+const getMime  = b => (b.match(/^data:(image\/[\w+]+);base64,/) || [])[1] || 'image/jpeg';
+const stripB64 = b => b.replace(/^data:image\/\w+;base64,/, '');
 
-// ─── REPLICATE POLLING ───────────────────────────────────────────────────────
-async function replicateWait(predictionUrl) {
-  let attempts = 0;
-  while (attempts++ < 90) {
-    await new Promise(r => setTimeout(r, 2000));
-    const res = await fetch(predictionUrl, {
-      headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` },
-    });
-    const p = await res.json();
-    if (p.status === 'succeeded') return p.output;
-    if (p.status === 'failed') throw new Error(`Replicate falhou: ${p.error}`);
-  }
-  throw new Error('Replicate timeout após 3 minutos');
-}
-
-async function replicateRun(modelPath, input) {
-  const res = await fetch(
-    `https://api.replicate.com/v1/models/${modelPath}/predictions`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Token ${process.env.REPLICATE_API_TOKEN}`,
-        'Content-Type': 'application/json',
-        Prefer: 'wait=60',
-      },
-      body: JSON.stringify({ input }),
-    }
-  );
-  const p = await res.json();
-  if (!res.ok) throw new Error(`Replicate error: ${JSON.stringify(p)}`);
-  if (p.status === 'succeeded') return p.output;
-  if (p.status === 'failed') throw new Error(`Replicate falhou: ${p.error}`);
-  return replicateWait(p.urls.get);
-}
-
-async function replicateRunVersion(version, input) {
-  const res = await fetch('https://api.replicate.com/v1/predictions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Token ${process.env.REPLICATE_API_TOKEN}`,
-      'Content-Type': 'application/json',
-      Prefer: 'wait=60',
-    },
-    body: JSON.stringify({ version, input }),
-  });
-  const p = await res.json();
-  if (!res.ok) throw new Error(`Replicate error: ${JSON.stringify(p)}`);
-  if (p.status === 'succeeded') return p.output;
-  if (p.status === 'failed') throw new Error(`Replicate falhou: ${p.error}`);
-  return replicateWait(p.urls.get);
-}
-
-// ─── STEP 1: CLAUDE HAIKU — analisa o pet ────────────────────────────────────
+// ─── CLAUDE HAIKU — analisa o pet ────────────────────────────────────────────
 async function analyzePet(b64, mime) {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -112,143 +59,99 @@ Size: tiny<3kg, small 3-10kg, medium 10-25kg, large 25-45kg, giant>45kg` },
   });
   if (!res.ok) throw new Error(`Claude ${res.status}: ${await res.text()}`);
   const data = await res.json();
-  const raw = data.content?.[0]?.text || '';
-  const m = raw.match(/\{[\s\S]*\}/);
+  const raw  = data.content?.[0]?.text || '';
+  const m    = raw.match(/\{[\s\S]*\}/);
   if (!m) throw new Error('Claude: JSON inválido');
   return JSON.parse(m[0]);
 }
 
-// ─── STEP 2: GROUNDING DINO — bounding box da região do acessório ─────────────
-function getAccessoryQuery(title) {
-  const t = title.toLowerCase();
-  if (t.includes('laço') || t.includes('bow') || t.includes('presilha')) return 'dog head top between ears';
-  if (t.includes('kit') || t.includes('conjunto')) return 'dog neck chest and head top';
-  if (t.includes('coleira') || t.includes('collar')) return 'dog neck';
-  return 'dog neck and chest area';  // bandana default
-}
+// ─── PROMPT INTELIGENTE POR TIPO DE ACESSÓRIO ────────────────────────────────
+// O Nano Banana entende visualmente as duas imagens — o prompt é instrução de edição
+// Não precisamos descrever o pet (ele já vê) nem o produto (ele já vê)
+// Só precisamos dizer O QUE fazer, ONDE colocar e como PRESERVAR
+function buildPrompt(productTitle, pet) {
+  const t = productTitle.toLowerCase();
+  const { size, breed, animal_type, fur_color, pose, neck_direction, neck_visible, head_top_visible } = pet;
+  const petDesc = `${size || 'medium'} ${breed || animal_type || 'dog'} with ${fur_color || 'mixed'} fur`;
+  const neckCtx = neck_direction === 'side' ? 'side profile' : neck_direction === 'three-quarter' ? 'three-quarter angle' : 'front-facing';
 
-function fallbackBbox(pet, title) {
-  const t = title.toLowerCase();
-  const isBow = t.includes('laço') || t.includes('bow') || t.includes('presilha');
-  const dir = pet?.neck_direction || 'front';
-  if (isBow) return { x1: 0.25, y1: 0.05, x2: 0.75, y2: 0.38 };
-  const map = { front: [0.20, 0.25, 0.80, 0.62], side: [0.15, 0.20, 0.75, 0.58],
-    'three-quarter': [0.15, 0.22, 0.80, 0.60], back: [0.15, 0.15, 0.85, 0.50] };
-  const [x1, y1, x2, y2] = map[dir] || map.front;
-  return { x1, y1, x2, y2 };
-}
+  // Base: preservação total do pet
+  const preserve = `Do NOT change anything about the dog: same face, same fur color and texture, same body markings, same pose (${pose}), same background, same lighting. Only ADD the accessory from the second image.`;
 
-async function detectRegion(imageUrl, pet, title) {
-  const query = getAccessoryQuery(title);
-  console.log(`   DINO query: "${query}"`);
-  try {
-    const output = await replicateRun('adirik/grounding-dino', {
-      image: imageUrl,
-      query,
-      box_threshold: 0.22,
-      text_threshold: 0.22,
-    });
-    console.log('   DINO output:', JSON.stringify(output)?.substring(0, 200));
-
-    // Parseia diferentes formatos de output do DINO
-    let boxes = [];
-    if (output?.boxes?.length) boxes = output.boxes;
-    else if (Array.isArray(output) && output[0]?.box) boxes = output.map(o => o.box);
-    else if (Array.isArray(output) && Array.isArray(output[0])) boxes = output;
-
-    if (!boxes.length) {
-      console.warn('   DINO: sem boxes, usando fallback');
-      return fallbackBbox(pet, title);
-    }
-
-    // Pega o box de maior score (primeiro ou o que cobre mais área)
-    const raw = boxes[0];
-    let x1, y1, x2, y2;
-    if (Array.isArray(raw)) [x1, y1, x2, y2] = raw;
-    else if (raw.x1 !== undefined) ({ x1, y1, x2, y2 } = raw);
-    else if (raw.xmin !== undefined) { x1 = raw.xmin; y1 = raw.ymin; x2 = raw.xmax; y2 = raw.ymax; }
-    else return fallbackBbox(pet, title);
-
-    // Expande 20% para garantir margem ao inpainting
-    const pw = x2 - x1, ph = y2 - y1;
-    return {
-      x1: Math.max(0, x1 - pw * 0.20),
-      y1: Math.max(0, y1 - ph * 0.20),
-      x2: Math.min(1, x2 + pw * 0.20),
-      y2: Math.min(1, y2 + ph * 0.20),
-    };
-  } catch (e) {
-    console.warn('   DINO falhou:', e.message, '— usando fallback');
-    return fallbackBbox(pet, title);
+  if (t.includes('bandana')) {
+    const neckTip = neck_visible
+      ? `The dog's neck is ${neckCtx} — wrap the bandana naturally around the neck following this exact angle.`
+      : `Place the bandana around the neck area, conforming to the fur.`;
+    return `Place the bandana from the second image on this dog's neck. ${neckTip} The bandana should form a natural triangle draping toward the chest, with the knot tied at the center-front. Reproduce the exact fabric texture, embroidery pattern, color and leather tag from the second image. The bandana must look physically real — natural folds, shadows consistent with the existing lighting. ${preserve}`;
   }
+
+  if (t.includes('laço') || t.includes('laco') || t.includes('bow') || t.includes('presilha')) {
+    const headTip = head_top_visible
+      ? `Place it centered on top of the skull, between and slightly behind the ears.`
+      : `Place it on the head between the ears, even if partially hidden by fur.`;
+    return `Place the bow/hair accessory from the second image on this dog's head. ${headTip} Reproduce the exact fabric, ribbon loops, center knot, color and texture from the second image. The accessory must be physically attached to the fur — not floating. Natural shadows consistent with existing lighting. ${preserve}`;
+  }
+
+  if (t.includes('kit') || t.includes('conjunto') || t.includes('set')) {
+    return `Place BOTH accessories from the second image on this dog simultaneously: (1) the bandana tied around the neck — knot at chest-front, triangle draping down, following the ${neckCtx} perspective; (2) the matching bow on top of the head between the ears. Both accessories must use the exact fabric, pattern and colors from the second image. Natural folds, real shadows, physically plausible placement. ${preserve}`;
+  }
+
+  if (t.includes('coleira') || t.includes('collar')) {
+    return `Place the collar from the second image around this dog's neck. Follow the ${neckCtx} perspective. Reproduce exact material, color, width and hardware from the second image. Collar fits snugly with natural drape. ${preserve}`;
+  }
+
+  return `Add the accessory from the second image to this dog in a natural, realistic way. Reproduce exact colors and materials from the second image. ${preserve}`;
 }
 
-// ─── STEP 3: SAM2 — máscara precisa pixel a pixel ────────────────────────────
-async function generateMask(imageUrl, bbox, W, H) {
-  const cx = Math.round(((bbox.x1 + bbox.x2) / 2) * W);
-  const cy = Math.round(((bbox.y1 + bbox.y2) / 2) * H);
-  // 5 pontos de prompt para cobertura melhor
-  const points = [
-    [cx, cy],
-    [Math.round(bbox.x1 * W + 10), cy],
-    [Math.round(bbox.x2 * W - 10), cy],
-    [cx, Math.round(bbox.y1 * H + 10)],
-    [cx, Math.round(bbox.y2 * H - 10)],
-  ].filter(p => p[0] > 0 && p[1] > 0 && p[0] < W && p[1] < H);
+// ─── FAL.AI POLLING ──────────────────────────────────────────────────────────
+async function falWait(requestId, modelPath) {
+  let attempts = 0;
+  while (attempts++ < 90) {
+    await new Promise(r => setTimeout(r, 3000));
+    const res = await fetch(
+      `https://queue.fal.run/${modelPath}/requests/${requestId}/status`,
+      { headers: { Authorization: `Key ${process.env.FAL_API_KEY}` } }
+    );
+    const data = await res.json();
+    console.log(`   fal status [${attempts}]: ${data.status}`);
+    if (data.status === 'COMPLETED') {
+      const resultRes = await fetch(
+        `https://queue.fal.run/${modelPath}/requests/${requestId}`,
+        { headers: { Authorization: `Key ${process.env.FAL_API_KEY}` } }
+      );
+      return await resultRes.json();
+    }
+    if (data.status === 'FAILED') throw new Error(`fal.ai falhou: ${JSON.stringify(data)}`);
+  }
+  throw new Error('fal.ai timeout após 4 minutos');
+}
 
-  console.log(`   SAM2 pontos:`, points);
-
-  const output = await replicateRun('meta/sam-2', {
-    image: imageUrl,
-    point_coords: points,
-    point_labels: points.map(() => 1),
-    multimask_output: false,
+async function runNanoBanana(imageUrls, prompt) {
+  // Submete job na fila do fal.ai
+  const submitRes = await fetch('https://queue.fal.run/fal-ai/nano-banana-pro/edit', {
+    method: 'POST',
+    headers: {
+      Authorization: `Key ${process.env.FAL_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      image_urls: imageUrls,  // [petUrl, productUrl]
+      prompt,
+    }),
   });
 
-  // SAM2 pode retornar array de URLs ou objeto com masks
-  let maskUrl;
-  if (Array.isArray(output)) maskUrl = output[0];
-  else if (output?.masks) maskUrl = output.masks[0];
-  else if (typeof output === 'string') maskUrl = output;
+  const submitData = await submitRes.json();
+  if (!submitRes.ok) throw new Error(`fal.ai submit error: ${JSON.stringify(submitData)}`);
+  console.log(`   fal.ai job submetido: ${submitData.request_id}`);
 
-  if (!maskUrl) throw new Error('SAM2: sem máscara');
-  console.log('   SAM2 máscara:', maskUrl);
-  return maskUrl;
+  // Se já completou síncronamente
+  if (submitData.images?.[0]?.url) return submitData;
+
+  // Polling até completar
+  return falWait(submitData.request_id, 'fal-ai/nano-banana-pro/edit');
 }
 
-// ─── STEP 4: Prompt de inpainting ────────────────────────────────────────────
-function buildPrompt(title, pet) {
-  const t = title.toLowerCase();
-  const { fur_color, size, breed, animal_type } = pet;
-  const petStr = `${size} ${breed || animal_type} with ${fur_color} fur`;
-
-  const base = `Photorealistic professional pet photography. ${petStr}.`;
-  const quality = 'Sharp focus, natural lighting, high detail, 8k quality.';
-  const neg = 'deformed, blurry, bad anatomy, distorted, floating, unrealistic, poorly drawn, extra limbs, changed fur color, changed dog face';
-
-  if (t.includes('bandana')) return {
-    positive: `${base} Wearing a lilac purple floral lace embroidered bandana tied around the neck. Triangular shape draping toward chest with neat center knot. Delicate flower embroidery on soft lavender cotton lace fabric. Small brown leather logo tag at corner. Natural fabric folds and shadows. ${quality}`,
-    negative: neg + ', wrong bandana color, missing knot',
-  };
-  if (t.includes('laço') || t.includes('bow') || t.includes('presilha')) return {
-    positive: `${base} Wearing a lilac purple floral lace bow hair accessory on top of head between ears. Two symmetrical fabric loops with center knot. Securely attached to fur. ${quality}`,
-    negative: neg + ', floating bow, wrong placement',
-  };
-  if (t.includes('kit') || t.includes('conjunto')) return {
-    positive: `${base} Wearing matching lilac purple floral lace accessories: bandana tied around neck forming triangle at chest, AND matching bow on top of head between ears. Same fabric and pattern on both. ${quality}`,
-    negative: neg + ', missing accessory',
-  };
-  if (t.includes('coleira') || t.includes('collar')) return {
-    positive: `${base} Wearing a fabric collar around the neck. Fits snugly, metal hardware visible at front. ${quality}`,
-    negative: neg,
-  };
-  return {
-    positive: `${base} Wearing ${title} as pet accessory. ${quality}`,
-    negative: neg,
-  };
-}
-
-// ─── HANDLER ─────────────────────────────────────────────────────────────────
+// ─── HANDLER PRINCIPAL ────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   setCorsHeaders(res);
   if (req.method === 'OPTIONS') return res.status(204).end();
@@ -261,97 +164,76 @@ export default async function handler(req, res) {
     const mime = getMime(imageBase64);
     const b64  = stripB64(imageBase64);
 
-    // STEP 1: Analisa pet
-    console.log('STEP 1 → Claude Haiku...');
+    // STEP 1: Claude Haiku analisa o pet
+    console.log('STEP 1 → Claude Haiku analisando pet...');
     let pet;
     try {
       pet = await analyzePet(b64, mime);
       console.log('   Pet:', JSON.stringify(pet));
     } catch (e) {
-      console.warn('   Falhou, defaults:', e.message);
-      pet = { is_pet: true, animal_type: 'dog', breed: 'mixed breed', size: 'medium',
+      console.warn('   Análise falhou, usando defaults:', e.message);
+      pet = {
+        is_pet: true, animal_type: 'dog', breed: 'mixed breed', size: 'medium',
         weight_kg: 10, fur_color: 'golden', fur_type: 'medium', pose: 'sitting',
         neck_visible: true, neck_direction: 'front', head_top_visible: true,
-        lighting: 'soft', background: 'outdoors' };
+        lighting: 'soft', background: 'outdoors',
+      };
     }
 
-    if (!pet.is_pet || pet.animal_type === 'none') return res.status(422).json({
-      error: 'not_a_pet',
-      message: 'Não identificamos um cachorro ou gato. Envie uma foto clara do seu pet.',
-    });
-    if (pet.animal_type !== 'dog' && pet.animal_type !== 'cat') return res.status(422).json({
-      error: 'unsupported_animal',
-      message: `Identificamos um(a) ${pet.animal_type}. No momento aceitamos apenas cachorros e gatos.`,
-    });
+    // Valida animal
+    if (!pet.is_pet || pet.animal_type === 'none') {
+      return res.status(422).json({
+        error: 'not_a_pet',
+        message: 'Não identificamos um cachorro ou gato. Envie uma foto clara do seu pet.',
+      });
+    }
+    if (pet.animal_type !== 'dog' && pet.animal_type !== 'cat') {
+      return res.status(422).json({
+        error: 'unsupported_animal',
+        message: `Identificamos um(a) ${pet.animal_type}. No momento aceitamos apenas cachorros e gatos.`,
+      });
+    }
 
-    // STEP 2: Upload pet → Cloudinary
-    console.log('STEP 2 → Upload pet...');
-    const petUp = await cloudinary.uploader.upload(imageBase64, {
-      folder: 'mm_pet_uploads',
-      transformation: [{ width: 1024, height: 1024, crop: 'limit' }, { quality: 'auto:best' }],
-    });
-    const petUrl = petUp.secure_url;
-    const W = petUp.width, H = petUp.height;
-    console.log(`   ${petUrl} (${W}x${H})`);
-
-    // STEP 3: Grounding DINO → bbox
-    console.log('STEP 3 → Grounding DINO...');
-    const bbox = await detectRegion(petUrl, pet, productTitle || '');
-    console.log('   Bbox:', JSON.stringify(bbox));
-
-    // STEP 4: SAM2 → máscara precisa
-    console.log('STEP 4 → SAM2...');
-    let maskUrl;
-    try {
-      maskUrl = await generateMask(petUrl, bbox, W, H);
-    } catch (e) {
-      // Fallback: máscara retangular via Cloudinary canvas
-      console.warn('   SAM2 falhou, usando retângulo:', e.message);
-      const x = Math.round(bbox.x1 * W);
-      const y = Math.round(bbox.y1 * H);
-      const w = Math.round((bbox.x2 - bbox.x1) * W);
-      const h = Math.round((bbox.y2 - bbox.y1) * H);
-      // Gera PNG de máscara: preto com retângulo branco na região
-      const maskUp = await cloudinary.uploader.upload(
-        `data:image/svg+xml;base64,${Buffer.from(
-          `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">
-            <rect width="${W}" height="${H}" fill="black"/>
-            <rect x="${x}" y="${y}" width="${w}" height="${h}" fill="white"/>
-          </svg>`
-        ).toString('base64')}`,
-        { folder: 'mm_masks', format: 'png' }
+    // STEP 2: Upload ambas as imagens para Cloudinary em paralelo
+    // Nano Banana precisa de URLs públicas — não aceita base64 direto
+    console.log('STEP 2 → Upload para Cloudinary...');
+    const uploads = [
+      cloudinary.uploader.upload(imageBase64, {
+        folder: 'mm_pet_uploads',
+        transformation: [{ width: 1024, height: 1024, crop: 'limit' }, { quality: 'auto:best' }],
+      }),
+    ];
+    if (productImageBase64) {
+      uploads.push(
+        cloudinary.uploader.upload(productImageBase64, {
+          folder: 'mm_product_refs',
+          transformation: [{ width: 800, height: 800, crop: 'limit' }, { quality: 'auto:best' }],
+        })
       );
-      maskUrl = maskUp.secure_url;
     }
+    const [petUp, prodUp] = await Promise.all(uploads);
+    const petUrl  = petUp.secure_url;
+    const prodUrl = prodUp?.secure_url || null;
+    console.log(`   Pet: ${petUrl}`);
+    console.log(`   Produto: ${prodUrl}`);
 
-    // STEP 5: Inpainting com SDXL
-    // SDXL: branco na máscara = área redesenhada, preto = preservado
-    console.log('STEP 5 → SDXL Inpainting...');
-    const { positive, negative } = buildPrompt(productTitle || '', pet);
-    console.log('   Prompt:', positive.substring(0, 120) + '...');
+    // STEP 3: Monta prompt contextualizado pelo Claude
+    console.log('STEP 3 → Montando prompt...');
+    const prompt = buildPrompt(productTitle || '', pet);
+    console.log('   Prompt:', prompt.substring(0, 150) + '...');
 
-    const inpaintOut = await replicateRunVersion(
-      // stability-ai/sdxl versão mais recente com suporte a inpainting
-      '39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b',
-      {
-        image: petUrl,
-        mask: maskUrl,
-        prompt: positive,
-        negative_prompt: negative,
-        prompt_strength: 0.85,    // quanto a área mascarada é alterada (0.8-0.9 ideal)
-        num_inference_steps: 40,
-        guidance_scale: 8.5,
-        width: W,
-        height: H,
-        seed: Math.floor(Math.random() * 999999),
-      }
-    );
+    // STEP 4: Nano Banana — edição visual nativa com as duas imagens
+    // Primeira URL = pet (referência principal), Segunda = produto (referência do acessório)
+    console.log('STEP 4 → Nano Banana (fal.ai) gerando...');
+    const imageUrls = prodUrl ? [petUrl, prodUrl] : [petUrl];
+    const falResult = await runNanoBanana(imageUrls, prompt);
 
-    const generatedUrl = Array.isArray(inpaintOut) ? inpaintOut[0] : inpaintOut;
-    if (!generatedUrl) throw new Error('Inpainting não retornou imagem.');
+    const generatedUrl = falResult.images?.[0]?.url;
+    if (!generatedUrl) throw new Error('Nano Banana não retornou imagem.');
+    console.log('   Gerado:', generatedUrl);
 
-    // STEP 6: Salva no Cloudinary
-    console.log('STEP 6 → Salvando resultado...');
+    // STEP 5: Salva resultado no Cloudinary
+    console.log('STEP 5 → Salvando no Cloudinary...');
     const saved = await cloudinary.uploader.upload(generatedUrl, {
       folder: 'mm_generated_results',
       transformation: [
@@ -365,7 +247,6 @@ export default async function handler(req, res) {
       status: 'succeeded',
       imageUrl: saved.secure_url,
       petAnalysis: pet,
-      debug: { bbox, maskUrl },
     });
 
   } catch (err) {
